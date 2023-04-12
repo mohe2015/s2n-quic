@@ -1,18 +1,43 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{procinfo::Proc, Args, Result};
-use netbench::stats::{Initialize, Print, Stats};
+use crate::{
+    collector::{procinfo::Proc, Args, Result, RunHandle},
+    stats::{Initialize, Print, Stats},
+};
 use std::{
-    process::Command,
+    process::{Child, Command},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    thread::JoinHandle,
     time::Duration,
 };
 
-pub fn run(args: &Args) -> Result<()> {
+pub struct GenericHandle {
+    is_open: Arc<AtomicBool>,
+    proc: Child,
+    handle: JoinHandle<()>,
+}
+
+impl RunHandle for GenericHandle {
+    fn wait(mut self) -> Result<()> {
+        self.proc.wait()?;
+        self.is_open.store(false, Ordering::Relaxed);
+        let _ = self.handle.join();
+        Ok(())
+    }
+
+    fn kill(mut self) -> Result<()> {
+        self.proc.kill()?;
+        self.is_open.store(false, Ordering::Relaxed);
+        let _ = self.handle.join();
+        Ok(())
+    }
+}
+
+pub fn run(args: &Args) -> Result<GenericHandle> {
     let mut command = Command::new(&args.driver);
 
     let driver = &args.driver;
@@ -24,7 +49,8 @@ pub fn run(args: &Args) -> Result<()> {
         .env("TRACE", "disabled")
         .env("SCENARIO", scenario_path);
 
-    let mut proc = command.spawn()?;
+    let proc = command.spawn()?;
+
     let info = Proc::new(proc.id());
 
     Initialize {
@@ -43,13 +69,11 @@ pub fn run(args: &Args) -> Result<()> {
         collect(info, interval, is_open_handle);
     });
 
-    proc.wait()?;
-
-    is_open.store(false, Ordering::Relaxed);
-
-    let _ = handle.join();
-
-    Ok(())
+    Ok(GenericHandle {
+        proc,
+        handle,
+        is_open,
+    })
 }
 
 fn collect(mut proc: Proc, interval: Duration, is_open: Arc<AtomicBool>) {
