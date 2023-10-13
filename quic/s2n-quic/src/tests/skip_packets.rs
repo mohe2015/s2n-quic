@@ -178,7 +178,53 @@ struct SkipInterceptor {
 }
 
 impl Interceptor for SkipInterceptor {
+    #[inline(always)]
+    fn intercept_rx_frame<'a, A: s2n_quic_core::frame::ack::AckRanges, D>(
+        &'a mut self,
+        frame: s2n_quic_core::frame::Frame<'a, A, D>,
+    ) -> s2n_quic_core::frame::Frame<'a, A, D> {
+        // use s2n_quic_core::frame::ack::AckRanges;
+        // use s2n_quic_core::packet::number::PacketNumberRange;
+
+        let mut transport_range = s2n_quic_transport::ack::ack_ranges::AckRanges::default();
+        match frame {
+            s2n_quic_core::frame::Frame::Ack(ack_frame) => {
+                let ack_ranges = ack_frame.ack_ranges();
+                // for aa in ack_range {
+                //     let start= aa.start();
+                //     let end = aa.end();
+                //     let start = PacketNumberSpace::ApplicationData.new_packet_number(*start);
+                //     let end = PacketNumberSpace::ApplicationData.new_packet_number(*end);
+                //     let pnr = PacketNumberRange::new(start, end);
+                //             transport_range.insert_packet_number_range(pnr);
+                // }
+                let ack = s2n_quic_core::frame::Ack {
+                    ack_delay: ack_frame.ack_delay,
+                    ack_ranges: transport_range,
+                    ecn_counts: ack_frame.ecn_counts,
+                };
+                s2n_quic_core::frame::Frame::Ack(ack)
+            }
+            f => f,
+        }
+    }
+
     fn intercept_rx_inject_ack(&mut self, space: PacketNumberSpace) -> Option<VarInt> {
+        // use s2n_quic_core::frame::ack::AckRanges;
+        // use s2n_quic_core::frame::Ack;
+
+        // let mut ack_range = s2n_quic_transport::ack::ack_ranges::AckRanges::default();
+        // ack_range
+        //     .insert_packet_number(packet_number.space().new_packet_number(pn))
+        //     .unwrap();
+
+        // //         // TODO possibly source ack_delay and ecn_counts values from the interceptor
+        // let insert_frame = Ack {
+        //     ack_delay: VarInt::default(),
+        //     ack_ranges: &ack_range,
+        //     ecn_counts: None,
+        // };
+
         if let Some(pn) = *self.skip_packet_number.lock().unwrap() {
             assert!(matches!(space, PacketNumberSpace::ApplicationData));
             // clear the packet_number to ack

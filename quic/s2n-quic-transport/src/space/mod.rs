@@ -808,6 +808,10 @@ pub trait PacketSpace<Config: endpoint::Config> {
                 frame: frame.into_event(),
             });
 
+            // bla
+            use s2n_quic_core::packet::interceptor::Interceptor;
+            let frame = packet_interceptor.intercept_rx_frame(frame);
+
             match frame {
                 Frame::Padding(frame) => {
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-19.1
@@ -841,8 +845,6 @@ pub trait PacketSpace<Config: endpoint::Config> {
                     .map_err(on_error)?;
                 }
                 Frame::Ack(frame) => {
-                    use s2n_quic_core::packet::interceptor::Interceptor;
-
                     let on_error = on_frame_processed!(frame);
 
                     if let Some(pn) =

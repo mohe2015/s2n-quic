@@ -34,6 +34,16 @@ pub struct Datagram<'a> {
 pub trait Interceptor: 'static + Send {
     // Inject an ACK frame for a packet number
     #[inline(always)]
+    fn intercept_rx_frame<'a, A: crate::frame::ack::AckRanges, D>(
+        // fn intercept_rx_frame<'a, A: crate::frame::ack::AckRanges, D>(
+        &'a mut self,
+        frame: crate::frame::Frame<'a, A, D>,
+    ) -> crate::frame::Frame<'a, A, D> {
+        frame
+    }
+
+    // Inject an ACK frame for a packet number
+    #[inline(always)]
     fn intercept_rx_inject_ack(&mut self, space: PacketNumberSpace) -> Option<VarInt> {
         let _ = space;
         None

@@ -7,7 +7,7 @@
 #![deny(unused_must_use)]
 extern crate alloc;
 
-mod ack;
+pub mod ack;
 mod contexts;
 mod processed_packet;
 mod space;
