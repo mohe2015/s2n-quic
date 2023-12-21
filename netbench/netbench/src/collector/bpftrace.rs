@@ -377,14 +377,16 @@ pub fn try_run(args: &Args) -> Result<Option<BpftraceHandle>> {
 }
 
 fn find_bpftrace() -> Result<String> {
-    let out = Command::new("which").arg("bpftrace").output()?;
-    if out.status.success() {
-        let out = core::str::from_utf8(&out.stdout)?;
-        let out = out.trim();
-        Ok(out.to_string())
-    } else {
-        Err("missing bpftrace".into())
-    }
+    Err("manually disabled bpftrace".into())
+
+    //     let out = Command::new("which").arg("bpftrace").output()?;
+    //     if out.status.success() {
+    //         let out = core::str::from_utf8(&out.stdout)?;
+    //         let out = out.trim();
+    //         Ok(out.to_string())
+    //     } else {
+    //         Err("missing bpftrace".into())
+    //     }
 }
 
 // finds the libc location for the given program
