@@ -1,13 +1,12 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! This module contains data structures for buffering incoming and outgoing data
-//! in Quic streams.
+//! This module contains data structures for buffering incoming streams.
 
-use crate::varint::VarInt;
+use super::Error;
+use crate::{buffer, varint::VarInt};
 use alloc::collections::{vec_deque, VecDeque};
 use bytes::BytesMut;
-use core::fmt;
 
 mod probe;
 mod request;
@@ -19,31 +18,7 @@ mod tests;
 use request::Request;
 use slot::Slot;
 
-/// Enumerates error that can occur while inserting data into the Receive Buffer
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum ReceiveBufferError {
-    /// An invalid data range was provided
-    OutOfRange,
-    /// The provided final size was invalid for the buffer's state
-    InvalidFin,
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for ReceiveBufferError {}
-
-impl fmt::Display for ReceiveBufferError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::OutOfRange => write!(f, "write extends out of the maximum possible offset"),
-            Self::InvalidFin => write!(
-                f,
-                "write modifies the final offset in a non-compliant manner"
-            ),
-        }
-    }
-}
-
-/// The default buffer size for slots that the [`ReceiveBuffer`] uses.
+/// The default buffer size for slots that the [`Reassembler`] uses.
 ///
 /// This value was picked as it is typically used for the default memory page size.
 const MIN_BUFFER_ALLOCATION_SIZE: usize = 4096;
@@ -58,14 +33,14 @@ const UNKNOWN_FINAL_SIZE: u64 = u64::MAX;
 //# Endpoints MUST be able to deliver stream data to an application as an
 //# ordered byte-stream.
 
-/// `ReceiveBuffer` is a buffer structure for combining chunks of bytes in an
+/// `Reassembler` is a buffer structure for combining chunks of bytes in an
 /// ordered stream, which might arrive out of order.
 ///
-/// `ReceiveBuffer` will accumulate the bytes, and provide them to its users
+/// `Reassembler` will accumulate the bytes, and provide them to its users
 /// once a contiguous range of bytes at the current position of the stream has
 /// been accumulated.
 ///
-/// `ReceiveBuffer` is optimized for minimizing memory allocations and for
+/// `Reassembler` is optimized for minimizing memory allocations and for
 /// offering it's users chunks of sizes that minimize call overhead.
 ///
 /// If data is received in smaller chunks, only the first chunk will trigger a
@@ -80,10 +55,10 @@ const UNKNOWN_FINAL_SIZE: u64 = u64::MAX;
 ///
 /// ## Usage
 ///
-/// ```rust,ignore
-/// use s2n_quic_transport::buffer::ReceiveBuffer;
+/// ```rust
+/// use s2n_quic_core::buffer::Reassembler;
 ///
-/// let mut buffer = ReceiveBuffer::new();
+/// let mut buffer = Reassembler::new();
 ///
 /// // write a chunk of bytes at offset 4, which can not be consumed yet
 /// assert!(buffer.write_at(4u32.into(), &[4, 5, 6, 7]).is_ok());
@@ -99,23 +74,23 @@ const UNKNOWN_FINAL_SIZE: u64 = u64::MAX;
 /// assert_eq!(&[0u8, 1, 2, 3, 4, 5, 6, 7], &buffer.pop().unwrap()[..]);
 /// ```
 #[derive(Debug, PartialEq)]
-pub struct ReceiveBuffer {
+pub struct Reassembler {
     slots: VecDeque<Slot>,
     start_offset: u64,
     max_recv_offset: u64,
     final_offset: u64,
 }
 
-impl Default for ReceiveBuffer {
+impl Default for Reassembler {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ReceiveBuffer {
-    /// Creates a new `ReceiveBuffer`
-    pub fn new() -> ReceiveBuffer {
-        ReceiveBuffer {
+impl Reassembler {
+    /// Creates a new `Reassembler`
+    pub fn new() -> Reassembler {
+        Reassembler {
             slots: VecDeque::new(),
             start_offset: 0,
             max_recv_offset: 0,
@@ -179,7 +154,7 @@ impl ReceiveBuffer {
 
     /// Pushes a slice at a certain offset
     #[inline]
-    pub fn write_at(&mut self, offset: VarInt, data: &[u8]) -> Result<(), ReceiveBufferError> {
+    pub fn write_at(&mut self, offset: VarInt, data: &[u8]) -> Result<(), Error> {
         // create a request
         let request = Request::new(offset, data)?;
         self.write_request(request)?;
@@ -188,7 +163,7 @@ impl ReceiveBuffer {
 
     /// Pushes a slice at a certain offset, which is the end of the buffer
     #[inline]
-    pub fn write_at_fin(&mut self, offset: VarInt, data: &[u8]) -> Result<(), ReceiveBufferError> {
+    pub fn write_at_fin(&mut self, offset: VarInt, data: &[u8]) -> Result<(), Error> {
         // create a request
         let request = Request::new(offset, data)?;
 
@@ -203,17 +178,11 @@ impl ReceiveBuffer {
         //# of type FINAL_SIZE_ERROR; see Section 11 for details on error
         //# handling.
         if let Some(final_size) = self.final_size() {
-            ensure!(
-                final_size == final_offset,
-                Err(ReceiveBufferError::InvalidFin)
-            );
+            ensure!(final_size == final_offset, Err(Error::InvalidFin));
         }
 
         // make sure that we didn't see any previous chunks greater than the final size
-        ensure!(
-            self.max_recv_offset <= final_offset,
-            Err(ReceiveBufferError::InvalidFin)
-        );
+        ensure!(self.max_recv_offset <= final_offset, Err(Error::InvalidFin));
 
         self.final_offset = final_offset;
 
@@ -223,7 +192,7 @@ impl ReceiveBuffer {
     }
 
     #[inline]
-    fn write_request(&mut self, request: Request) -> Result<(), ReceiveBufferError> {
+    fn write_request(&mut self, request: Request) -> Result<(), Error> {
         // trim off any data that we've already read
         let (_, request) = request.split(self.start_offset);
         // trim off any data that exceeds our final length
@@ -236,7 +205,7 @@ impl ReceiveBuffer {
         //# final size for the stream, an endpoint SHOULD respond with an error
         //# of type FINAL_SIZE_ERROR; see Section 11 for details on error
         //# handling.
-        ensure!(excess.is_empty(), Err(ReceiveBufferError::InvalidFin));
+        ensure!(excess.is_empty(), Err(Error::InvalidFin));
 
         // if the request is empty we're done
         ensure!(!request.is_empty(), Ok(()));
@@ -300,20 +269,17 @@ impl ReceiveBuffer {
     /// This can be used for copy-avoidance applications where a packet is received in order and
     /// doesn't need to be stored temporarily for future packets to unblock the stream.
     #[inline]
-    pub fn skip(&mut self, len: usize) -> Result<(), ReceiveBufferError> {
+    pub fn skip(&mut self, len: VarInt) -> Result<(), Error> {
         // zero-length skip is a no-op
-        ensure!(len > 0, Ok(()));
+        ensure!(len > VarInt::ZERO, Ok(()));
 
         let new_start_offset = self
             .start_offset
-            .checked_add(len as u64)
-            .ok_or(ReceiveBufferError::OutOfRange)?;
+            .checked_add(len.as_u64())
+            .ok_or(Error::OutOfRange)?;
 
         if let Some(final_size) = self.final_size() {
-            ensure!(
-                final_size >= new_start_offset,
-                Err(ReceiveBufferError::InvalidFin)
-            );
+            ensure!(final_size >= new_start_offset, Err(Error::InvalidFin));
         }
 
         // record the maximum offset that we've seen
@@ -396,48 +362,6 @@ impl ReceiveBuffer {
 
             (buffer.split_to(watermark), watermark)
         })
-    }
-
-    /// Copies all the available buffered data into the provided `buf`'s remaining capacity.
-    ///
-    /// This method is slightly more efficient than [`Self::pop`] when the caller ends up copying
-    /// the buffered data into another slice, since it avoids a refcount increment/decrement on
-    /// the contained [`BytesMut`].
-    ///
-    /// The total number of bytes copied is returned.
-    #[inline]
-    pub fn copy_into_buf<B: bytes::BufMut>(&mut self, buf: &mut B) -> usize {
-        use bytes::Buf;
-
-        let mut total = 0;
-
-        loop {
-            let remaining = buf.remaining_mut();
-            // ensure we have enough capacity in the destination buf
-            ensure!(remaining > 0, total);
-
-            let transform = |buffer: &mut BytesMut, is_final_offset| {
-                let watermark = buffer.len().min(remaining);
-
-                // copy bytes into the destination buf
-                buf.put_slice(&buffer[..watermark]);
-                // advance the chunk rather than splitting to avoid refcount churn
-                buffer.advance(watermark);
-                total += watermark;
-
-                (is_final_offset, watermark)
-            };
-
-            match self.pop_transform(transform) {
-                // if we're at the final offset, then no need to keep iterating
-                Some(true) => break,
-                Some(false) => continue,
-                // no more available chunks
-                None => break,
-            }
-        }
-
-        total
     }
 
     /// Pops a buffer from the front of the receive queue as long as the `transform` function returns a
@@ -667,7 +591,7 @@ pub struct Iter<'a> {
 
 impl<'a> Iter<'a> {
     #[inline]
-    fn new(buffer: &'a ReceiveBuffer) -> Self {
+    fn new(buffer: &'a Reassembler) -> Self {
         Self {
             prev_end: buffer.start_offset,
             inner: buffer.slots.iter(),
@@ -690,7 +614,7 @@ impl<'a> Iterator for Iter<'a> {
 }
 
 pub struct Drain<'a> {
-    inner: &'a mut ReceiveBuffer,
+    inner: &'a mut Reassembler,
 }
 
 impl<'a> Iterator for Drain<'a> {
@@ -705,5 +629,196 @@ impl<'a> Iterator for Drain<'a> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         let len = self.inner.slots.len();
         (len, Some(len))
+    }
+}
+
+impl buffer::reader::Storage for Reassembler {
+    type Error = core::convert::Infallible;
+
+    #[inline]
+    fn buffered_len(&self) -> usize {
+        self.len()
+    }
+
+    #[inline]
+    fn buffer_is_empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    #[inline]
+    fn read_chunk(
+        &mut self,
+        watermark: usize,
+    ) -> Result<buffer::reader::storage::Chunk, Self::Error> {
+        if let Some(chunk) = self.pop_watermarked(watermark) {
+            return Ok(chunk.into());
+        }
+
+        Ok(Default::default())
+    }
+
+    #[inline]
+    fn partial_copy_into<Dest: buffer::writer::Storage>(
+        &mut self,
+        dest: &mut Dest,
+    ) -> Result<buffer::reader::storage::Chunk, Self::Error> {
+        let mut prev = BytesMut::new();
+
+        loop {
+            let remaining = dest.remaining_capacity();
+            // ensure we have enough capacity in the destination buf
+            ensure!(remaining > 0, Ok(Default::default()));
+
+            match self.pop_watermarked(remaining) {
+                Some(chunk) => {
+                    let mut prev = core::mem::replace(&mut prev, chunk);
+                    if !prev.is_empty() {
+                        let _: Result<(), core::convert::Infallible> = prev.copy_into(dest);
+                    }
+                }
+                None if prev.is_empty() => {
+                    return Ok(Default::default());
+                }
+                None => {
+                    return Ok(prev.into());
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn copy_into<Dest: buffer::writer::Storage>(
+        &mut self,
+        dest: &mut Dest,
+    ) -> Result<(), Self::Error> {
+        loop {
+            let remaining = dest.remaining_capacity();
+            // ensure we have enough capacity in the destination buf
+            ensure!(remaining > 0, Ok(()));
+
+            let transform = |buffer: &mut BytesMut, _is_final_offset| {
+                let len = buffer.len().min(remaining);
+                let _: Result<(), core::convert::Infallible> = buffer.copy_into(dest);
+                ((), len)
+            };
+
+            if self.pop_transform(transform).is_none() {
+                return Ok(());
+            }
+        }
+    }
+}
+
+impl buffer::reader::Reader for Reassembler {
+    #[inline]
+    fn current_offset(&self) -> VarInt {
+        unsafe {
+            // SAFETY: offset will always fit into a VarInt
+            VarInt::new_unchecked(self.start_offset)
+        }
+    }
+
+    #[inline]
+    fn final_offset(&self) -> Option<VarInt> {
+        self.final_size().map(|v| unsafe {
+            // SAFETY: offset will always fit into a VarInt
+            VarInt::new_unchecked(v)
+        })
+    }
+}
+
+impl buffer::writer::Writer for Reassembler {
+    #[inline]
+    fn copy_from<R: buffer::Reader>(
+        &mut self,
+        reader: &mut R,
+    ) -> Result<(), buffer::Error<R::Error>> {
+        let final_offset = reader.final_offset();
+
+        // optimize for the case where the stream consists of a single chunk
+        if let Some(final_offset) = final_offset {
+            let mut is_single_chunk_stream = true;
+
+            let offset = reader.current_offset();
+
+            // the reader is starting at the beginning of the stream
+            is_single_chunk_stream &= offset == VarInt::ZERO;
+            // the reader has buffered the final offset
+            is_single_chunk_stream &= reader.has_buffered_fin();
+            // no data has been consumed from the Reassembler
+            is_single_chunk_stream &= self.consumed_len() == 0;
+            // we aren't tracking any slots
+            is_single_chunk_stream &= self.slots.is_empty();
+
+            if is_single_chunk_stream {
+                let payload_len = reader.buffered_len();
+                let end = final_offset.as_u64();
+
+                // don't allocate anything if we don't need to
+                if payload_len == 0 {
+                    let chunk = reader.read_chunk(0)?;
+                    debug_assert!(chunk.is_empty());
+                } else {
+                    let mut data = BytesMut::with_capacity(payload_len);
+
+                    // copy the whole thing into `data`
+                    reader.copy_into(&mut data)?;
+
+                    self.slots.push_back(Slot::new(offset.as_u64(), end, data));
+                };
+
+                // update the final offset after everything was read correctly
+                self.final_offset = end;
+                self.invariants();
+
+                return Ok(());
+            }
+        }
+
+        // TODO add better support for copy avoidance by iterating to the appropriate slot and
+        // copying into that, if possible
+
+        // fall back to copying individual chunks into the receive buffer
+        let mut first_write = true;
+        loop {
+            let offset = reader.current_offset();
+            let chunk = reader.read_chunk(usize::MAX)?;
+
+            // Record the final size before writing to avoid excess allocation. This also needs to
+            // happen after we read the first chunk in case there are errors.
+            if first_write {
+                if let Some(offset) = final_offset {
+                    self.write_at_fin(offset, &[])
+                        .map_err(buffer::Error::mapped)?;
+                }
+            }
+
+            // TODO maybe specialize on BytesMut chunks? - for now we'll just treat them as
+            // slices
+
+            self.write_at(offset, &chunk)
+                .map_err(buffer::Error::mapped)?;
+
+            first_write = false;
+
+            if reader.buffer_is_empty() {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl buffer::Duplex for Reassembler {
+    #[inline]
+    fn skip(&mut self, len: VarInt, final_offset: Option<VarInt>) -> Result<(), Error> {
+        if let Some(offset) = final_offset {
+            self.write_at_fin(offset, &[])?;
+        }
+
+        (*self).skip(len)?;
+
+        Ok(())
     }
 }
